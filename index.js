@@ -1,140 +1,140 @@
 #!/usr/bin/env node
+
 /**
- * base_rpc_health - RPC Health Monitor for Base
- * 
- * Checks multiple Base RPC endpoints and returns health status
- * Based on the problem: "Why We Run Six RPC Endpoints" (Askew agent)
- * 
- * Usage: 
- *   node index.js [--json]
- *   node index.js --best      # Returns just the best RPC URL
- *   node index.js --failover  # Returns best working RPC for failover
+ * Base RPC Health + Gas Service
+ * Monitors RPC endpoints AND gas prices
  */
 
+const https = require('https');
+const http = require('http');
+
+// RPC endpoints to check
 const RPC_ENDPOINTS = [
-  'https://mainnet.base.org',
-  'https://base.llamarpc.com',
-  'https://1rpc.io/base',
-  'https://rpc.ankr.com/base',
-  'https://base.publicnode.com'
+  { name: 'base.publicnode.com', url: 'https://base.publicnode.com' },
+  { name: 'base.llamarpc.com', url: 'https://base.llamarpc.com' },
+  { name: 'mainnet.base.org', url: 'https://mainnet.base.org' },
+  { name: '1rpc.io/base', url: 'https://1rpc.io/base' },
+  { name: 'rpc.ankr.com/base', url: 'https://rpc.ankr.com/base' }
 ];
 
-const TIMEOUT = 5000; // 5 seconds
+const TIMEOUT = 10000;
 
-// Export for use as module
-async function getBestRPC() {
-  const results = await Promise.all(RPC_ENDPOINTS.map(checkRPC));
-  const working = results.filter(r => r.status === 'ok').sort((a, b) => a.latency - b.latency);
-  return working[0]?.url || null;
-}
-
-async function getFailoverRPC() {
-  const best = await getBestRPC();
-  return best;
-}
-
-module.exports = { checkRPC, getBestRPC, getFailoverRPC, RPC_ENDPOINTS };
-
-// CLI mode
-
-async function checkRPC(url) {
-  const start = Date.now();
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TIMEOUT);
+/**
+ * Make JSON-RPC request
+ */
+function makeRequest(url, method = 'eth_blockNumber') {
+  return new Promise((resolve) => {
+    const client = url.startsWith('https') ? https : http;
+    const start = Date.now();
     
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'eth_blockNumber',
-        params: [],
-        id: 1
-      }),
-      signal: controller.signal
+    const req = client.post(url, {
+      headers: { 'Content-Type': 'application/json' }
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        const latency = Date.now() - start;
+        try {
+          const json = JSON.parse(data);
+          resolve({ success: true, latency, data: json });
+        } catch (e) {
+          resolve({ success: false, latency, error: e.message });
+        }
+      });
     });
     
-    clearTimeout(timeout);
-    const latency = Date.now() - start;
+    req.on('error', (e) => {
+      resolve({ success: false, latency: Date.now() - start, error: e.message });
+    });
     
-    if (!response.ok) {
-      return { url, status: 'error', latency, error: `HTTP ${response.status}` };
-    }
+    req.write(JSON.stringify({
+      jsonrpc: '2.0',
+      method,
+      params: [],
+      id: 1
+    }));
     
-    const data = await response.json();
+    req.end();
     
-    if (data.error) {
-      return { url, status: 'error', latency, error: data.error.message };
-    }
-    
-    return { 
-      url, 
-      status: 'ok', 
-      latency,
-      blockNumber: data.result
-    };
-    
-  } catch (error) {
-    const latency = Date.now() - start;
-    return { 
-      url, 
-      status: 'error', 
-      latency, 
-      error: error.message || 'Unknown error' 
-    };
-  }
+    setTimeout(() => {
+      req.destroy();
+      resolve({ success: false, latency: TIMEOUT, error: 'Timeout' });
+    }, TIMEOUT);
+  });
 }
 
-async function main() {
-  const args = process.argv.slice(2);
-  const json = args.includes('--json');
-  const bestFlag = args.includes('--best');
-  const failoverFlag = args.includes('--failover');
-  
-  if (bestFlag || failoverFlag) {
-    const best = await getBestRPC();
-    if (bestFlag) {
-      console.log(best);
-    } else if (failoverFlag) {
-      console.log(JSON.stringify({ failover: best, timestamp: new Date().toISOString() }));
-    }
-    return;
+/**
+ * Check gas price
+ */
+async function checkGasPrice(rpcUrl) {
+  const result = await makeRequest(rpcUrl, 'eth_gasPrice');
+  if (result.success) {
+    const gasHex = result.data.result;
+    const gasWei = parseInt(gasHex, 16);
+    const gasGwei = (gasWei / 1e9).toFixed(2);
+    return { success: true, gasGwei: parseFloat(gasGwei) };
   }
+  return { success: false, error: result.error };
+}
+
+/**
+ * Main
+ */
+async function main() {
+  console.log('\n🔗 Base RPC Health + Gas Service');
+  console.log('═══════════════════════════════════════\n');
   
-  const results = await Promise.all(RPC_ENDPOINTS.map(checkRPC));
+  const results = [];
+  
+  // Check each RPC
+  console.log('📡 Checking RPCs...\n');
+  
+  for (const endpoint of RPC_ENDPOINTS) {
+    const result = await makeRequest(endpoint.url);
+    if (result.success) {
+      const blockHex = result.data.result;
+      const blockNum = parseInt(blockHex, 16);
+      results.push({ name: endpoint.name, latency: result.latency, block: blockNum, status: 'ok' });
+      console.log(`✅ ${endpoint.name}: ${result.latency}ms | Block: ${blockNum}`);
+    } else {
+      results.push({ name: endpoint.name, latency: result.latency, error: result.error, status: 'fail' });
+      console.log(`❌ ${endpoint.name}: ${result.error || 'Failed'}`);
+    }
+  }
   
   // Sort by latency
-  const sorted = [...results].sort((a, b) => a.latency - b.latency);
+  results.sort((a, b) => a.latency - b.latency);
   
-  const working = sorted.filter(r => r.status === 'ok');
-  const best = working[0] || null;
+  // Get best RPC
+  const working = results.filter(r => r.status === 'ok');
+  const best = working[0];
   
-  if (json) {
-    console.log(JSON.stringify({
-      checked: results.length,
-      working: working.length,
-      best,
-      results: sorted
-    }, null, 2));
-  } else {
-    console.log('=== Base RPC Health Check ===\n');
-    
-    console.log('Results (sorted by latency):');
-    sorted.forEach((r, i) => {
-      const icon = r.status === 'ok' ? '✅' : '❌';
-      console.log(`${icon} ${r.url}`);
-      console.log(`   Latency: ${r.latency}ms${r.blockNumber ? ` | Block: ${parseInt(r.blockNumber, 16)}` : ''}`);
-      if (r.error) console.log(`   Error: ${r.error}`);
-      console.log('');
-    });
-    
-    if (best) {
-      console.log(`Best RPC: ${best.url} (${best.latency}ms)`);
-    } else {
-      console.log('⚠️ No working RPC endpoints found!');
+  // Check gas price on best RPC
+  console.log('\n⛽ Checking gas price...\n');
+  let gasPrice = null;
+  if (best) {
+    const gas = await checkGasPrice(best.url);
+    if (gas.success) {
+      gasPrice = gas.gasGwei;
+      console.log(`💰 Gas Price: ${gas.gasGwei} Gwei`);
     }
   }
+  
+  console.log('\n═══════════════════════════════════════');
+  console.log(`Best RPC: ${best ? best.name + ' (' + best.latency + 'ms)' : 'None working'}`);
+  console.log(`Working: ${working.length}/${RPC_ENDPOINTS.length}`);
+  if (gasPrice) console.log(`Gas: ${gasPrice} Gwei`);
+  console.log('═══════════════════════════════════════\n');
+  
+  // Return JSON for automation
+  return {
+    timestamp: new Date().toISOString(),
+    best: best ? { name: best.name, latency: best.latency, url: best.url } : null,
+    working: working.length,
+    total: RPC_ENDPOINTS.length,
+    gasPrice: gasPrice,
+    results: results
+  };
 }
 
-main();
+main().then(console.log).catch(console.error);
