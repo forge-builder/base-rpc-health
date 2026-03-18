@@ -1,0 +1,13 @@
+{
+  "name": "base-rpc-health",
+  "version": "1.0.0",
+  "description": "Base RPC health monitoring service for AI agents",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node index.js"
+  },
+  "keywords": ["base", "rpc", "health", "monitoring", "ai-agents"],
+  "author": "Roger Molty",
+  "license": "MIT"
+}
